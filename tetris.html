@@ -204,7 +204,7 @@
     letter-spacing: 0.08em;
     text-shadow: 0 0 14px color-mix(in srgb, var(--accent) 60%, transparent);
   }
-  .overlay p { color: var(--ink-dim); font-size: 0.75rem; margin: 0; max-width: 260px; line-height: 1.5; }
+  .overlay p { color: #b7bce2; font-size: 0.75rem; margin: 0; max-width: 260px; line-height: 1.5; }
   .btn {
     font-family: inherit;
     font-weight: 700;
@@ -247,11 +247,27 @@
     border-color: var(--accent-2);
     transform: scale(0.94);
   }
-  .ctrl-btn.wide { grid-column: span 2; }
-  .ctrl-btn .k { font-size: 0.5rem; letter-spacing: 0.1em; color: var(--ink-dim); position: absolute; margin-top: 22px; }
+  .ctrl-btn:focus-visible {
+    outline: 2px solid var(--accent-2);
+    outline-offset: 2px;
+  }
+  .ctrl-btn.wide {
+    grid-column: span 2;
+    font-size: 0.7rem;
+    white-space: nowrap;
+    overflow: hidden;
+  }
 
   @media (prefers-reduced-motion: reduce) {
     .ctrl-btn, .btn { transition: none !important; }
+  }
+
+  @media (max-height: 640px) {
+    .tagline { display: none; }
+    .stat .label { font-size: 0.42rem; }
+    .stat .value { font-size: 0.9rem; }
+    .ctrl-btn { padding: 8px 0; font-size: 1.1rem; }
+    .app { gap: 4px; }
   }
 </style>
 </head>
@@ -284,6 +300,10 @@
         <span class="label">Next</span>
         <canvas id="next" width="80" height="80"></canvas>
       </div>
+      <div class="panel-box">
+        <span class="label">Hold</span>
+        <canvas id="hold" width="80" height="80"></canvas>
+      </div>
       <div class="panel-box" style="text-align:center;">
         <span class="label">Pause</span>
         <button class="btn" id="pauseBtn" style="width:100%; padding:6px 0; font-size:0.65rem;">II</button>
@@ -292,12 +312,12 @@
   </div>
 
   <div class="controls">
-    <div class="ctrl-btn" id="btnLeft">◀</div>
-    <div class="ctrl-btn" id="btnRotate">⟳</div>
-    <div class="ctrl-btn" id="btnRight">▶</div>
-    <div class="ctrl-btn" id="btnDrop">⤓</div>
-    <div class="ctrl-btn wide" id="btnSoft">SOFT DROP (hold)</div>
-    <div class="ctrl-btn wide" id="btnHold">HOLD</div>
+    <div class="ctrl-btn" id="btnLeft" role="button" tabindex="0" aria-label="Move left">◀</div>
+    <div class="ctrl-btn" id="btnRotate" role="button" tabindex="0" aria-label="Rotate">⟳</div>
+    <div class="ctrl-btn" id="btnRight" role="button" tabindex="0" aria-label="Move right">▶</div>
+    <div class="ctrl-btn" id="btnDrop" role="button" tabindex="0" aria-label="Hard drop">⤓</div>
+    <div class="ctrl-btn wide" id="btnSoft" role="button" tabindex="0" aria-label="Soft drop, hold to repeat">SOFT DROP</div>
+    <div class="ctrl-btn wide" id="btnHold" role="button" tabindex="0" aria-label="Hold piece">HOLD</div>
   </div>
 </div>
 
@@ -308,8 +328,10 @@
   const COLS = 10, ROWS = 20;
   const boardCanvas = document.getElementById("board");
   const nextCanvas = document.getElementById("next");
+  const holdCanvas = document.getElementById("hold");
   const ctx = boardCanvas.getContext("2d");
   const nctx = nextCanvas.getContext("2d");
+  const hctx = holdCanvas.getContext("2d");
   const scoreEl = document.getElementById("score");
   const linesEl = document.getElementById("lines");
   const bestEl = document.getElementById("best");
@@ -340,9 +362,10 @@
   const LOCK_DELAY = 400;
 
   let grid, current, next, hold, holdUsed;
-  let dropTimer, softDropping, lockTimer;
+  let dropTimer, softDropping, lockTimer, lockResets;
   let score, lines, running, paused;
   let cell = 24;
+  const MAX_LOCK_RESETS = 15;
   let best = parseInt(localStorage.getItem("dropblock_best") || "0", 10);
   bestEl.textContent = best;
 
@@ -382,10 +405,11 @@
     return false;
   }
 
-  function spawn() {
+  function spawn(resetHold = true) {
     current = next || makePiece(randKey());
     next = makePiece(randKey());
-    holdUsed = false;
+    lockResets = 0;
+    if (resetHold) holdUsed = false;
     drawNext();
     if (collides(current)) {
       gameOver();
@@ -395,6 +419,12 @@
   }
 
   function lockPiece() {
+    // A piece still partly above row 0 when it locks means the stack topped out.
+    const toppedOut = current.cells.some(c => current.y + c.y < 0);
+    if (toppedOut) {
+      gameOver();
+      return;
+    }
     for (const c of current.cells) {
       const gx = current.x + c.x, gy = current.y + c.y;
       if (gy >= 0) grid[gy][gx] = current.key;
@@ -469,13 +499,21 @@
   function restartLockTimer(force) {
     const grounded = collides(current, 0, 1);
     if (lockTimer) { clearTimeout(lockTimer); lockTimer = null; }
-    if (grounded || force === true) {
-      if (grounded) {
-        lockTimer = setTimeout(() => {
-          if (collides(current, 0, 1)) lockPiece();
-          draw();
-        }, LOCK_DELAY);
+    if (force === true) lockResets = 0;
+    if (grounded) {
+      // Cap how many times touching down can be postponed, so a piece can't float forever.
+      if (lockResets >= MAX_LOCK_RESETS) {
+        lockPiece();
+        draw();
+        return;
       }
+      lockResets++;
+      lockTimer = setTimeout(() => {
+        lockTimer = null;
+        if (!running || paused) return;
+        if (collides(current, 0, 1)) lockPiece();
+        draw();
+      }, LOCK_DELAY);
     }
   }
 
@@ -484,18 +522,27 @@
     holdUsed = true;
     if (!hold) {
       hold = { key: current.key };
-      spawn();
+      spawn(false);
     } else {
       const tmp = current.key;
-      current = makePiece(hold.key);
+      const swapped = makePiece(hold.key);
+      if (collides(swapped)) {
+        gameOver();
+        return;
+      }
+      current = swapped;
       hold = { key: tmp };
+      lockResets = 0;
+      restartLockTimer();
     }
     drawHoldIndicator();
     draw();
   }
 
   function drawHoldIndicator() {
-    // reflected via next-panel label swap not needed; kept simple
+    hctx.clearRect(0, 0, holdCanvas.width, holdCanvas.height);
+    if (!hold) return;
+    drawPreview(hctx, holdCanvas, hold.key);
   }
 
   function gameOver() {
@@ -553,6 +600,12 @@
         if (gy >= 0) drawCell(ctx, gx, gy, COLORS[current.key], cell);
       }
       ctx.globalAlpha = 1;
+      ctx.strokeStyle = COLORS[current.key];
+      ctx.lineWidth = 1.5;
+      for (const c of current.cells) {
+        const gx = current.x + c.x, gy = current.y + c.y + dist;
+        if (gy >= 0) ctx.strokeRect(gx * cell + 2, gy * cell + 2, cell - 4, cell - 4);
+      }
 
       for (const c of current.cells) {
         const gx = current.x + c.x, gy = current.y + c.y;
@@ -569,20 +622,25 @@
     context.fillRect(x * size + pad, y * size + pad, size - pad * 2, (size - pad * 2) * 0.28);
   }
 
-  function drawNext() {
-    nctx.clearRect(0, 0, nextCanvas.width, nextCanvas.height);
-    if (!next) return;
+  function drawPreview(context, canvas, key) {
+    const cells = SHAPES[key].map(([x, y]) => ({ x, y }));
     const size = 18;
-    const xs = next.cells.map(c => c.x), ys = next.cells.map(c => c.y);
+    const xs = cells.map(c => c.x), ys = cells.map(c => c.y);
     const minX = Math.min(...xs), maxX = Math.max(...xs);
     const minY = Math.min(...ys), maxY = Math.max(...ys);
     const w = (maxX - minX + 1) * size, h = (maxY - minY + 1) * size;
-    const offX = (nextCanvas.width - w) / 2 - minX * size;
-    const offY = (nextCanvas.height - h) / 2 - minY * size;
-    for (const c of next.cells) {
-      nctx.fillStyle = COLORS[next.key];
-      nctx.fillRect(offX + c.x * size + 2, offY + c.y * size + 2, size - 4, size - 4);
+    const offX = (canvas.width - w) / 2 - minX * size;
+    const offY = (canvas.height - h) / 2 - minY * size;
+    for (const c of cells) {
+      context.fillStyle = COLORS[key];
+      context.fillRect(offX + c.x * size + 2, offY + c.y * size + 2, size - 4, size - 4);
     }
+  }
+
+  function drawNext() {
+    nctx.clearRect(0, 0, nextCanvas.width, nextCanvas.height);
+    if (!next) return;
+    drawPreview(nctx, nextCanvas, next.key);
   }
 
   function tick() {
@@ -597,12 +655,13 @@
 
   function startGame() {
     grid = emptyGrid();
-    score = 0; lines = 0; hold = null; holdUsed = false;
+    score = 0; lines = 0; hold = null; holdUsed = false; lockResets = 0;
     running = true; paused = false;
     scoreEl.textContent = "0";
     linesEl.textContent = "0";
     overlay.classList.add("hidden");
     pauseBtn.textContent = "II";
+    drawHoldIndicator();
     next = makePiece(randKey());
     spawn();
     if (dropTimer) clearInterval(dropTimer);
@@ -615,12 +674,16 @@
     paused = !paused;
     pauseBtn.textContent = paused ? "▶" : "II";
     if (paused) {
+      // Freeze the lock-delay clock too, so a grounded piece can't lock in while the overlay is up.
+      if (lockTimer) { clearTimeout(lockTimer); lockTimer = null; }
+      if (softInterval) { clearInterval(softInterval); softInterval = null; }
       overlayTitle.textContent = "PAUSED";
       overlayText.textContent = `Score ${score} · Lines ${lines}`;
       startBtn.textContent = "RESUME";
       overlay.classList.remove("hidden");
     } else {
       overlay.classList.add("hidden");
+      if (current) restartLockTimer();
     }
   }
 
@@ -645,15 +708,19 @@
   });
 
   // --- Touch / tap controls ---
+  const activePresses = [];
   function bindPress(el, onDown, onUp) {
     let active = false;
     const start = (e) => { e.preventDefault(); if (active) return; active = true; el.classList.add("pressed"); onDown(); };
-    const end = (e) => { if (e) e.preventDefault(); active = false; el.classList.remove("pressed"); if (onUp) onUp(); };
+    const end = (e) => { if (e) e.preventDefault(); if (!active) return; active = false; el.classList.remove("pressed"); if (onUp) onUp(); };
     el.addEventListener("touchstart", start, { passive: false });
     el.addEventListener("touchend", end, { passive: false });
     el.addEventListener("touchcancel", end, { passive: false });
     el.addEventListener("mousedown", start);
     window.addEventListener("mouseup", end);
+    // Recovery hook: if the OS eats the touchend/touchcancel event (an interrupting
+    // system gesture, an incoming call), this forces the button back to released.
+    activePresses.push(end);
   }
 
   bindPress(document.getElementById("btnLeft"), () => tryMove(-1, 0));
@@ -668,6 +735,17 @@
     () => { if (softInterval) { clearInterval(softInterval); softInterval = null; } }
   );
 
+  function releaseAllPresses() {
+    activePresses.forEach(end => end(null));
+  }
+  window.addEventListener("blur", releaseAllPresses);
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) {
+      releaseAllPresses();
+      if (running && !paused) togglePause();
+    }
+  });
+
   // Swipe gestures directly on the board
   let touchStartX = null, touchStartY = null, touchStartT = 0, swiped = false;
   boardCanvas.addEventListener("touchstart", (e) => {
@@ -680,13 +758,16 @@
     const t = e.changedTouches[0];
     const dx = t.clientX - touchStartX;
     const dy = t.clientY - touchStartY;
-    if (Math.abs(dx) > cell * 0.9) {
+    // Treat the swipe as either horizontal or vertical, never both, so a diagonal
+    // drag can't move sideways and hard-drop in the same gesture.
+    if (Math.abs(dx) > cell * 0.9 && Math.abs(dx) > Math.abs(dy)) {
       tryMove(dx > 0 ? 1 : -1, 0);
       touchStartX = t.clientX;
+      touchStartY = t.clientY;
       swiped = true;
-    }
-    if (dy > cell * 1.3) {
+    } else if (dy > cell * 1.3) {
       hardDrop();
+      touchStartX = t.clientX;
       touchStartY = t.clientY;
       swiped = true;
     }
